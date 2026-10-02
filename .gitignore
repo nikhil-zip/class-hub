@@ -3,3 +3,4 @@ node_modules/
 database/*.db*
 uploads/*
 !uploads/.gitkeep
+.DS_Store
