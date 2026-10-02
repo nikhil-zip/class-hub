@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="theme-color" content="#f5f7f4">
+    <title>Student hub — ClassHub</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+
+<body class="app-bg student-bg">
+    <header class="topbar app-bar"><a class="brand" href="/"><span class="brand-mark">c</span> classhub</a>
+        <div class="bar-right"><span class="local-pill"><i></i> LOCAL CLASSROOM</span><button id="studentLogout"
+                class="text-button" hidden>Leave</button></div>
+    </header>
+    <main class="student-wrap">
+        <section id="joinView" class="login-card join-card">
+            <div class="eyebrow">STUDENT ACCESS</div>
+            <h1>Join your classroom.</h1>
+            <p>Enter your details to see class updates and materials.</p>
+            <form id="joinForm"><label>Student ID<input name="studentId" placeholder="e.g. MCA2026001" maxlength="40"
+                        required></label><label>Your name<input name="name" placeholder="Your full name" maxlength="80"
+                        required></label><button class="button primary full">Join ClassHub <span>→</span></button>
+                <div class="form-error" id="joinError"></div>
+            </form><small class="hint">Connect to your classroom Wi-Fi before joining.</small>
+        </section>
+        <section id="studentView" hidden>
+            <div class="student-heading">
+                <div>
+                    <div class="eyebrow">YOUR CLASSROOM</div>
+                    <h1>Welcome, <span id="studentName">there</span></h1>
+                    <p>Your classroom updates and learning resources, all in one place.</p>
+                </div><span class="local-pill"><i></i> OFFLINE READY</span>
+            </div>
+            <section class="session-card">
+                <div class="session-info"><span class="eyebrow">RESOURCE ACCESS</span>
+                    <h2 id="sessionTitle">Ready when you are.</h2>
+                    <p id="sessionDescription">Request a session when you’re ready to download a file.</p>
+                </div>
+                <div class="session-action">
+                    <div class="session-state" id="sessionState">AVAILABLE</div><strong
+                        id="sessionTime">—</strong><button class="button primary" id="requestAccess">Request access
+                        <span>→</span></button><button class="button secondary" id="cancelQueue" hidden>Leave
+                        queue</button>
+                </div>
+            </section>
+            <div class="student-columns">
+                <section class="panel announcements-panel">
+                    <div class="panel-head">
+                        <div><span class="eyebrow">FROM YOUR TEACHER</span>
+                            <h2>Announcements</h2>
+                        </div>
+                    </div>
+                    <div id="studentAnnouncements" class="content-list"></div>
+                </section>
+                <section class="panel materials-panel">
+                    <div class="panel-head">
+                        <div><span class="eyebrow">CLASS LIBRARY</span>
+                            <h2>Study materials</h2>
+                        </div><span class="count-chip" id="materialCount">0</span>
+                    </div>
+                    <div class="search-box"><span>⌕</span><input id="searchMaterials" placeholder="Search materials…"
+                            type="search"></div>
+                    <div id="studentMaterials" class="content-list"></div>
+                    <div class="resource-note">Large downloads are available during your active resource session.</div>
+                </section>
+            </div>
+        </section>
+    </main>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/js/student.js" defer></script>
+</body>
+
+</html>
