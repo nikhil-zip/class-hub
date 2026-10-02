@@ -21,7 +21,11 @@ if (isProduction) {
   if (!path.isAbsolute(process.env.DATABASE_PATH) || !path.isAbsolute(process.env.UPLOAD_DIR)) {
     throw new Error('DATABASE_PATH and UPLOAD_DIR must be absolute persistent-disk paths in production.');
   }
-  if (process.env.ADMIN_USERNAME === 'admin' || process.env.ADMIN_PASSWORD === 'admin123' || process.env.SESSION_SECRET.length < 32) {
+  const adminPassword = process.env.ADMIN_PASSWORD.toLowerCase();
+  const sessionSecret = process.env.SESSION_SECRET.toLowerCase();
+  const placeholderPassword = ['admin123', 'change-this-password'].includes(adminPassword) || adminPassword.includes('replace-this');
+  const placeholderSecret = sessionSecret.length < 32 || ['change-this', 'replace-this', 'local-development'].some(marker => sessionSecret.includes(marker));
+  if (process.env.ADMIN_USERNAME === 'admin' || placeholderPassword || placeholderSecret) {
     throw new Error('Production credentials must be changed and SESSION_SECRET must contain at least 32 characters.');
   }
 }
