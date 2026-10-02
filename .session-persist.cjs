@@ -1,0 +1,3 @@
+const fs=require('node:fs');const base='http://localhost:3000';
+async function main(){if(process.argv[2]==='save'){const r=await fetch(base+'/api/auth/teacher',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password:'admin123'})});const c=r.headers.get('set-cookie');if(!r.ok||!c)throw Error('Teacher login did not issue session cookie');fs.writeFileSync('.session-cookie',c.split(';')[0]);console.log('session cookie saved for restart check');return}const cookie=fs.readFileSync('.session-cookie','utf8');const r=await fetch(base+'/api/teacher/dashboard',{headers:{Cookie:cookie}});console.log('PERSISTED SESSION',r.status);if(r.status!==200)process.exitCode=1}
+main().catch(e=>{console.error(e);process.exitCode=1});

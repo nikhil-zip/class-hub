@@ -18,6 +18,9 @@ if (isProduction) {
   for (const key of ['ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SESSION_SECRET', 'DATABASE_PATH', 'UPLOAD_DIR']) {
     if (!process.env[key]) throw new Error(`${key} must be configured when NODE_ENV=production`);
   }
+  if (!path.isAbsolute(process.env.DATABASE_PATH) || !path.isAbsolute(process.env.UPLOAD_DIR)) {
+    throw new Error('DATABASE_PATH and UPLOAD_DIR must be absolute persistent-disk paths in production.');
+  }
   if (process.env.ADMIN_USERNAME === 'admin' || process.env.ADMIN_PASSWORD === 'admin123' || process.env.SESSION_SECRET.length < 32) {
     throw new Error('Production credentials must be changed and SESSION_SECRET must contain at least 32 characters.');
   }
@@ -163,7 +166,7 @@ app.post('/api/teacher/announcements', teacherOnly, (req, res) => {
 });
 app.delete('/api/teacher/announcements/:id', teacherOnly, (req, res) => { db.prepare('DELETE FROM announcements WHERE id=?').run(Number(req.params.id)); res.json({ ok: true }); });
 app.post('/api/teacher/materials', teacherOnly, (req, res) => upload.single('file')(req, res, err => {
-  if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File exceeds the upload size limit.' : err.message });
+  if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File exceeds the upload size limit.' : err.message === 'Unsupported file type.' ? err.message : 'The file could not be uploaded.' });
   if (!req.file) return res.status(400).json({ error: 'Choose a file to upload.' });
   const title = safeText(req.body.title, 120) || path.parse(req.file.originalname).name;
   db.prepare('INSERT INTO materials (title,filename,original_name,file_size,uploaded_at,uploaded_by) VALUES (?,?,?,?,?,?)').run(title, req.file.filename, path.basename(req.file.originalname), req.file.size, timestamp(), req.session.teacher.username); res.json({ ok: true });
