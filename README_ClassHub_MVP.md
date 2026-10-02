@@ -984,7 +984,7 @@ Active:
 
 Queue:
 12
-```
+
 
 The simulation should use the same scheduler as real students.
 
