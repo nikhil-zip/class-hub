@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS web_sessions (sid TEXT PRIMARY KEY, data TEXT NOT NUL
 `);
 const config = { maxActiveSessions: Math.max(1, Number(process.env.MAX_ACTIVE_SESSIONS) || 8), sessionDuration: Math.max(5, Number(process.env.SESSION_DURATION) || 90), cooldownDuration: Math.max(0, Number(process.env.COOLDOWN_DURATION) || 180) };
 const scheduler = createScheduler(db, config);
+const classroomEnabled = process.env.CLASSROOM_ENABLED !== 'false';
 const expectedUser = process.env.ADMIN_USERNAME || 'admin';
 const expectedPassword = process.env.ADMIN_PASSWORD || 'admin123';
 const adminPasswordHash = bcrypt.hash(expectedPassword, 10);
@@ -60,22 +61,27 @@ class SQLiteSessionStore extends session.Store {
       callback(null, JSON.parse(row.data));
     } catch (error) { callback(error); }
   }
-  set(sid, value, callback = () => {}) {
+  set(sid, value, callback = () => { }) {
     try {
       const expiresAt = value.cookie?.expires ? new Date(value.cookie.expires).getTime() : Date.now() + 12 * 60 * 60 * 1000;
       this.database.prepare('INSERT INTO web_sessions (sid,data,expires_at) VALUES (?,?,?) ON CONFLICT(sid) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at').run(sid, JSON.stringify(value), expiresAt);
       callback(null);
     } catch (error) { callback(error); }
   }
-  destroy(sid, callback = () => {}) {
+  destroy(sid, callback = () => { }) {
     try { this.database.prepare('DELETE FROM web_sessions WHERE sid=?').run(sid); callback(null); }
     catch (error) { callback(error); }
   }
-  touch(sid, value, callback = () => {}) { this.set(sid, value, callback); }
+  touch(sid, value, callback = () => { }) { this.set(sid, value, callback); }
 }
 app.use(session({ name: 'classhub.sid', store: new SQLiteSessionStore(db), secret: process.env.SESSION_SECRET || 'classhub-local-development-secret-change-me', resave: false, saveUninitialized: false, rolling: true, cookie: { httpOnly: true, sameSite: 'lax', secure: isProduction, maxAge: 12 * 60 * 60 * 1000 } }));
+app.use((req, res, next) => {
+  const classroomPath = ['/teacher', '/student', '/teacher.html', '/student.html'].includes(req.path) || ['/api/auth/teacher', '/api/auth/student', '/api/student', '/api/teacher', '/api/materials'].some(prefix => req.path === prefix || req.path.startsWith(`${prefix}/`));
+  if (!classroomEnabled && classroomPath) return res.status(404).sendFile(path.join(ROOT, 'public', '404.html'));
+  next();
+});
 app.use('/api', (req, res, next) => {
-  if (['POST','PUT','DELETE'].includes(req.method)) {
+  if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
     const key = req.ip; const now = Date.now(); const rate = limits.get(key) || { start: now, count: 0 };
     if (now - rate.start > 60_000) { rate.start = now; rate.count = 0; }
     rate.count++; limits.set(key, rate); if (rate.count > 100) return res.status(429).json({ error: 'Too many requests. Try again shortly.' });
@@ -93,7 +99,7 @@ const studentOnly = (req, res, next) => {
   if (!student) return res.status(401).json({ error: 'Student session expired. Please join again.' });
   db.prepare('UPDATE students SET last_seen=? WHERE id=?').run(timestamp(), student.id); req.student = student; next();
 };
-const extAllowed = new Set(['.pdf','.ppt','.pptx','.doc','.docx','.txt','.jpg','.jpeg','.png','.zip']);
+const extAllowed = new Set(['.pdf', '.ppt', '.pptx', '.doc', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.zip']);
 const storage = multer.diskStorage({ destination: uploadDir, filename: (req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`) });
 const upload = multer({ storage, limits: { fileSize: (Number(process.env.MAX_UPLOAD_MB) || 25) * 1024 * 1024 }, fileFilter: (req, file, cb) => extAllowed.has(path.extname(file.originalname).toLowerCase()) ? cb(null, true) : cb(new Error('Unsupported file type.')) });
 
@@ -110,7 +116,7 @@ app.post('/api/auth/student', (req, res) => {
   const token = crypto.randomBytes(32).toString('hex'); const now = timestamp(); const ip = req.ip;
   let student = db.prepare('SELECT * FROM students WHERE student_id=? AND simulated=0').get(id);
   if (student) db.prepare('UPDATE students SET name=?, session_token=?, ip_address=?, last_seen=? WHERE id=?').run(name, token, ip, now, student.id);
-  else { const result = db.prepare('INSERT INTO students (student_id,name,session_token,ip_address,created_at,last_seen) VALUES (?,?,?,?,?,?)').run(id,name,token,ip,now,now); student = { id: Number(result.lastInsertRowid) }; }
+  else { const result = db.prepare('INSERT INTO students (student_id,name,session_token,ip_address,created_at,last_seen) VALUES (?,?,?,?,?,?)').run(id, name, token, ip, now, now); student = { id: Number(result.lastInsertRowid) }; }
   req.session.regenerate(err => { if (err) return res.status(500).json({ error: 'Could not start student session.' }); req.session.student = { id: student.id, token }; res.json({ ok: true }); });
 });
 app.post('/api/auth/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
@@ -125,7 +131,7 @@ app.get('/api/student/session', studentOnly, (req, res) => res.json({ session: s
 app.post('/api/student/session/request', studentOnly, (req, res) => res.json({ session: scheduler.request(req.student.id) }));
 app.post('/api/student/session/cancel', studentOnly, (req, res) => { scheduler.cancelQueue(req.student.id); res.json({ session: scheduler.statusFor(req.student.id) }); });
 app.get('/api/student/materials', studentOnly, (req, res) => {
-  const search = safeText(req.query.q, 100); const rows = search ? db.prepare('SELECT id,title,original_name,file_size,uploaded_at FROM materials WHERE title LIKE ? OR original_name LIKE ? ORDER BY uploaded_at DESC').all(`%${search}%`,`%${search}%`) : db.prepare('SELECT id,title,original_name,file_size,uploaded_at FROM materials ORDER BY uploaded_at DESC').all();
+  const search = safeText(req.query.q, 100); const rows = search ? db.prepare('SELECT id,title,original_name,file_size,uploaded_at FROM materials WHERE title LIKE ? OR original_name LIKE ? ORDER BY uploaded_at DESC').all(`%${search}%`, `%${search}%`) : db.prepare('SELECT id,title,original_name,file_size,uploaded_at FROM materials ORDER BY uploaded_at DESC').all();
   res.json({ materials: rows });
 });
 app.get('/api/materials/:id/download', studentOnly, (req, res) => {
@@ -142,7 +148,7 @@ app.get('/api/teacher/dashboard', teacherOnly, (req, res) => {
     queue: db.prepare("SELECT COUNT(*) AS n FROM access_queue WHERE status='waiting'").get().n,
     materials: db.prepare('SELECT COUNT(*) AS n FROM materials').get().n,
     announcements: db.prepare('SELECT COUNT(*) AS n FROM announcements').get().n,
-    realStudents: db.prepare('SELECT COUNT(*) AS n FROM students WHERE simulated=0 AND last_seen>?').get(timestamp()-86400).n,
+    realStudents: db.prepare('SELECT COUNT(*) AS n FROM students WHERE simulated=0 AND last_seen>?').get(timestamp() - 86400).n,
     simulatedStudents: db.prepare('SELECT COUNT(*) AS n FROM students WHERE simulated=1').get().n
   };
   const active = db.prepare("SELECT s.id,s.student_id,s.name,s.simulated,x.started_at,x.expires_at FROM sessions x JOIN students s ON s.id=x.student_id WHERE x.status='active' AND x.expires_at>? ORDER BY x.started_at").all(timestamp());
@@ -153,34 +159,44 @@ app.get('/api/teacher/dashboard', teacherOnly, (req, res) => {
 app.post('/api/teacher/announcements', teacherOnly, (req, res) => {
   const title = safeText(req.body?.title, 120); const content = safeText(req.body?.content, 3000);
   if (!title || !content) return res.status(400).json({ error: 'Add a title and message.' });
-  db.prepare('INSERT INTO announcements (title,content,created_at,created_by) VALUES (?,?,?,?)').run(title,content,timestamp(),req.session.teacher.username); res.json({ ok: true });
+  db.prepare('INSERT INTO announcements (title,content,created_at,created_by) VALUES (?,?,?,?)').run(title, content, timestamp(), req.session.teacher.username); res.json({ ok: true });
 });
 app.delete('/api/teacher/announcements/:id', teacherOnly, (req, res) => { db.prepare('DELETE FROM announcements WHERE id=?').run(Number(req.params.id)); res.json({ ok: true }); });
-app.post('/api/teacher/materials', teacherOnly, (req, res) => upload.single('file')(req,res,err => {
+app.post('/api/teacher/materials', teacherOnly, (req, res) => upload.single('file')(req, res, err => {
   if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File exceeds the upload size limit.' : err.message });
   if (!req.file) return res.status(400).json({ error: 'Choose a file to upload.' });
   const title = safeText(req.body.title, 120) || path.parse(req.file.originalname).name;
-  db.prepare('INSERT INTO materials (title,filename,original_name,file_size,uploaded_at,uploaded_by) VALUES (?,?,?,?,?,?)').run(title,req.file.filename,path.basename(req.file.originalname),req.file.size,timestamp(),req.session.teacher.username); res.json({ ok: true });
+  db.prepare('INSERT INTO materials (title,filename,original_name,file_size,uploaded_at,uploaded_by) VALUES (?,?,?,?,?,?)').run(title, req.file.filename, path.basename(req.file.originalname), req.file.size, timestamp(), req.session.teacher.username); res.json({ ok: true });
 }));
-app.delete('/api/teacher/materials/:id', teacherOnly, (req, res) => { const item = db.prepare('SELECT filename FROM materials WHERE id=?').get(Number(req.params.id)); if (item) { db.prepare('DELETE FROM materials WHERE id=?').run(Number(req.params.id)); const p=path.resolve(uploadDir,item.filename); if(p.startsWith(uploadDir+path.sep)) fs.rmSync(p,{force:true}); } res.json({ ok: true }); });
+app.delete('/api/teacher/materials/:id', teacherOnly, (req, res) => { const item = db.prepare('SELECT filename FROM materials WHERE id=?').get(Number(req.params.id)); if (item) { db.prepare('DELETE FROM materials WHERE id=?').run(Number(req.params.id)); const p = path.resolve(uploadDir, item.filename); if (p.startsWith(uploadDir + path.sep)) fs.rmSync(p, { force: true }); } res.json({ ok: true }); });
 app.post('/api/teacher/simulate', teacherOnly, (req, res) => {
   db.prepare("DELETE FROM access_queue WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run();
   db.prepare("DELETE FROM sessions WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare('DELETE FROM students WHERE simulated=1').run();
-  const add = db.prepare('INSERT INTO students (student_id,name,session_token,ip_address,created_at,last_seen,simulated) VALUES (?,?,?,?,?,?,1)'); const now=timestamp();
-  const request = db.transaction(() => { for(let i=1;i<=20;i++){const label=`Student ${String(i).padStart(2,'0')}`; const id=Number(add.run(`DEMO-${String(i).padStart(2,'0')}`,label,crypto.randomBytes(32).toString('hex'),'simulation',now,now).lastInsertRowid); scheduler.request(id);} }); request(); res.json({ ok: true });
+  const add = db.prepare('INSERT INTO students (student_id,name,session_token,ip_address,created_at,last_seen,simulated) VALUES (?,?,?,?,?,?,1)'); const now = timestamp();
+  const request = db.transaction(() => { for (let i = 1; i <= 20; i++) { const label = `Student ${String(i).padStart(2, '0')}`; const id = Number(add.run(`DEMO-${String(i).padStart(2, '0')}`, label, crypto.randomBytes(32).toString('hex'), 'simulation', now, now).lastInsertRowid); scheduler.request(id); } }); request(); res.json({ ok: true });
 });
-app.post('/api/teacher/simulate/clear', teacherOnly, (req,res)=>{ db.prepare("DELETE FROM access_queue WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare("DELETE FROM sessions WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare('DELETE FROM students WHERE simulated=1').run(); res.json({ok:true}); });
+app.post('/api/teacher/simulate/clear', teacherOnly, (req, res) => { db.prepare("DELETE FROM access_queue WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare("DELETE FROM sessions WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare('DELETE FROM students WHERE simulated=1').run(); res.json({ ok: true }); });
 
-app.get('/', (req,res)=>res.sendFile(path.join(ROOT,'public','index.html')));
-const publicPages = ['about','how-it-works','features','developer','contact','privacy','terms','classroom'];
-for (const page of publicPages) app.get(`/${page}`, (req,res)=>res.sendFile(path.join(ROOT,'public',`${page}.html`)));
-app.get('/teacher', (req,res)=>res.sendFile(path.join(ROOT,'public','teacher.html')));
-app.get('/student', (req,res)=>res.sendFile(path.join(ROOT,'public','student.html')));
-app.get('/404', (req,res)=>res.status(404).sendFile(path.join(ROOT,'public','404.html')));
-app.get('/500', (req,res)=>res.status(500).sendFile(path.join(ROOT,'public','500.html')));
-app.use((req,res)=>{
+app.get('/', (req, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
+const publicPages = ['about', 'how-it-works', 'features', 'developer', 'contact', 'privacy', 'terms', 'classroom'];
+for (const page of publicPages) app.get(`/${page}`, (req, res) => res.sendFile(path.join(ROOT, 'public', `${page}.html`)));
+app.get('/robots.txt', (req, res) => {
+  const origin = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  res.type('text/plain').send(`User-agent: *\nAllow: /\nDisallow: /teacher\nDisallow: /student\nDisallow: /api/\nSitemap: ${origin.replace(/\/$/, '')}/sitemap.xml\n`);
+});
+app.get('/sitemap.xml', (req, res) => {
+  const origin = (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  const xmlOrigin = origin.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const paths = ['/', '/about', '/how-it-works', '/features', '/developer', '/contact', '/privacy', '/terms'];
+  res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${paths.map(page => `<url><loc>${xmlOrigin}${page}</loc></url>`).join('')}</urlset>`);
+});
+app.get('/teacher', (req, res) => res.sendFile(path.join(ROOT, 'public', 'teacher.html')));
+app.get('/student', (req, res) => res.sendFile(path.join(ROOT, 'public', 'student.html')));
+app.get('/404', (req, res) => res.status(404).sendFile(path.join(ROOT, 'public', '404.html')));
+app.get('/500', (req, res) => res.status(500).sendFile(path.join(ROOT, 'public', '500.html')));
+app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'The requested endpoint was not found.' });
-  res.status(404).sendFile(path.join(ROOT,'public','404.html'));
+  res.status(404).sendFile(path.join(ROOT, 'public', '404.html'));
 });
 app.use((error, req, res, next) => {
   console.error(`[request error] ${req.method} ${req.path}: ${error.message}`);
