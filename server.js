@@ -13,10 +13,21 @@ const { createScheduler } = require('./services/accessScheduler');
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const ROOT = __dirname;
-const uploadDir = path.join(ROOT, 'uploads');
-const dbDir = path.join(ROOT, 'database');
+const isProduction = process.env.NODE_ENV === 'production';
+if (isProduction) {
+  for (const key of ['ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SESSION_SECRET', 'DATABASE_PATH', 'UPLOAD_DIR']) {
+    if (!process.env[key]) throw new Error(`${key} must be configured when NODE_ENV=production`);
+  }
+  if (process.env.ADMIN_USERNAME === 'admin' || process.env.ADMIN_PASSWORD === 'admin123' || process.env.SESSION_SECRET.length < 32) {
+    throw new Error('Production credentials must be changed and SESSION_SECRET must contain at least 32 characters.');
+  }
+}
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
+const uploadDir = path.resolve(process.env.UPLOAD_DIR || path.join(ROOT, 'uploads'));
+const databasePath = path.resolve(process.env.DATABASE_PATH || path.join(ROOT, 'database', 'classhub.db'));
+const dbDir = path.dirname(databasePath);
 fs.mkdirSync(uploadDir, { recursive: true }); fs.mkdirSync(dbDir, { recursive: true });
-const db = new DatabaseSync(path.join(dbDir, 'classhub.db'));
+const db = new DatabaseSync(databasePath);
 db.exec('PRAGMA journal_mode = WAL');
 db.transaction = (callback) => (...args) => {
   db.exec('BEGIN');
@@ -29,13 +40,40 @@ CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY, title TEXT NOT
 CREATE TABLE IF NOT EXISTS materials (id INTEGER PRIMARY KEY, title TEXT NOT NULL, filename TEXT NOT NULL, original_name TEXT NOT NULL, file_size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, uploaded_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES students(id), session_token TEXT NOT NULL, ip_address TEXT, started_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, cooldown_until INTEGER, status TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS access_queue (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES students(id), requested_at INTEGER NOT NULL, status TEXT NOT NULL, granted_at INTEGER);
+CREATE TABLE IF NOT EXISTS web_sessions (sid TEXT PRIMARY KEY, data TEXT NOT NULL, expires_at INTEGER NOT NULL);
 `);
 const config = { maxActiveSessions: Math.max(1, Number(process.env.MAX_ACTIVE_SESSIONS) || 8), sessionDuration: Math.max(5, Number(process.env.SESSION_DURATION) || 90), cooldownDuration: Math.max(0, Number(process.env.COOLDOWN_DURATION) || 180) };
 const scheduler = createScheduler(db, config);
+const expectedUser = process.env.ADMIN_USERNAME || 'admin';
+const expectedPassword = process.env.ADMIN_PASSWORD || 'admin123';
+const adminPasswordHash = bcrypt.hash(expectedPassword, 10);
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '100kb' }));
-app.use(session({ name: 'classhub.sid', secret: process.env.SESSION_SECRET || 'classhub-local-development-secret-change-me', resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'lax', secure: false, maxAge: 12 * 60 * 60 * 1000 } }));
+class SQLiteSessionStore extends session.Store {
+  constructor(database) { super(); this.database = database; }
+  get(sid, callback) {
+    try {
+      const row = this.database.prepare('SELECT data,expires_at FROM web_sessions WHERE sid=?').get(sid);
+      if (!row) return callback(null, null);
+      if (row.expires_at <= Date.now()) { this.destroy(sid, () => callback(null, null)); return; }
+      callback(null, JSON.parse(row.data));
+    } catch (error) { callback(error); }
+  }
+  set(sid, value, callback = () => {}) {
+    try {
+      const expiresAt = value.cookie?.expires ? new Date(value.cookie.expires).getTime() : Date.now() + 12 * 60 * 60 * 1000;
+      this.database.prepare('INSERT INTO web_sessions (sid,data,expires_at) VALUES (?,?,?) ON CONFLICT(sid) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at').run(sid, JSON.stringify(value), expiresAt);
+      callback(null);
+    } catch (error) { callback(error); }
+  }
+  destroy(sid, callback = () => {}) {
+    try { this.database.prepare('DELETE FROM web_sessions WHERE sid=?').run(sid); callback(null); }
+    catch (error) { callback(error); }
+  }
+  touch(sid, value, callback = () => {}) { this.set(sid, value, callback); }
+}
+app.use(session({ name: 'classhub.sid', store: new SQLiteSessionStore(db), secret: process.env.SESSION_SECRET || 'classhub-local-development-secret-change-me', resave: false, saveUninitialized: false, rolling: true, cookie: { httpOnly: true, sameSite: 'lax', secure: isProduction, maxAge: 12 * 60 * 60 * 1000 } }));
 app.use('/api', (req, res, next) => {
   if (['POST','PUT','DELETE'].includes(req.method)) {
     const key = req.ip; const now = Date.now(); const rate = limits.get(key) || { start: now, count: 0 };
@@ -45,7 +83,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 const limits = new Map(); setInterval(() => { for (const [key, item] of limits) if (Date.now() - item.start > 120_000) limits.delete(key); }, 60_000).unref();
-app.use(express.static(path.join(ROOT, 'public')));
+app.use(express.static(path.join(ROOT, 'public'), { index: false, fallthrough: true }));
 const timestamp = () => Math.floor(Date.now() / 1000);
 const safeText = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const teacherOnly = (req, res, next) => req.session.teacher ? next() : res.status(401).json({ error: 'Teacher login required.' });
@@ -63,9 +101,7 @@ app.get('/api/status', (req, res) => res.json({ online: true, config: { maxActiv
 app.get('/api/me', (req, res) => res.json({ role: req.session.teacher ? 'teacher' : req.session.student ? 'student' : null }));
 app.post('/api/auth/teacher', async (req, res) => {
   const username = safeText(req.body?.username, 80); const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  const expectedUser = process.env.ADMIN_USERNAME || 'admin'; const expectedPassword = process.env.ADMIN_PASSWORD || 'admin123';
-  const passwordHash = await bcrypt.hash(expectedPassword, 10);
-  if (username !== expectedUser || !(await bcrypt.compare(password, passwordHash))) return res.status(401).json({ error: 'Check your username and password.' });
+  if (username !== expectedUser || !(await bcrypt.compare(password, await adminPasswordHash))) return res.status(401).json({ error: 'Check your username and password.' });
   req.session.regenerate(err => { if (err) return res.status(500).json({ error: 'Could not start teacher session.' }); req.session.teacher = { username }; res.json({ ok: true }); });
 });
 app.post('/api/auth/student', (req, res) => {
@@ -135,8 +171,24 @@ app.post('/api/teacher/simulate', teacherOnly, (req, res) => {
 });
 app.post('/api/teacher/simulate/clear', teacherOnly, (req,res)=>{ db.prepare("DELETE FROM access_queue WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare("DELETE FROM sessions WHERE student_id IN (SELECT id FROM students WHERE simulated=1)").run(); db.prepare('DELETE FROM students WHERE simulated=1').run(); res.json({ok:true}); });
 
+app.get('/', (req,res)=>res.sendFile(path.join(ROOT,'public','index.html')));
+const publicPages = ['about','how-it-works','features','developer','contact','privacy','terms','classroom'];
+for (const page of publicPages) app.get(`/${page}`, (req,res)=>res.sendFile(path.join(ROOT,'public',`${page}.html`)));
 app.get('/teacher', (req,res)=>res.sendFile(path.join(ROOT,'public','teacher.html')));
 app.get('/student', (req,res)=>res.sendFile(path.join(ROOT,'public','student.html')));
-app.get('*', (req,res)=>res.sendFile(path.join(ROOT,'public','index.html')));
+app.get('/404', (req,res)=>res.status(404).sendFile(path.join(ROOT,'public','404.html')));
+app.get('/500', (req,res)=>res.status(500).sendFile(path.join(ROOT,'public','500.html')));
+app.use((req,res)=>{
+  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'The requested endpoint was not found.' });
+  res.status(404).sendFile(path.join(ROOT,'public','404.html'));
+});
+app.use((error, req, res, next) => {
+  console.error(`[request error] ${req.method} ${req.path}: ${error.message}`);
+  if (res.headersSent) return next(error);
+  const status = Number(error.status) >= 400 && Number(error.status) < 600 ? Number(error.status) : 500;
+  if (req.path.startsWith('/api/')) return res.status(status).json({ error: status === 413 ? 'Request is too large.' : status < 500 ? error.message : 'The request could not be completed.' });
+  res.status(status).sendFile(path.join(ROOT, status === 404 ? 'public/404.html' : 'public/500.html'));
+});
+setInterval(() => db.prepare('DELETE FROM web_sessions WHERE expires_at<=?').run(Date.now()), 60 * 60 * 1000).unref();
 setInterval(() => scheduler.expireAndPromote(), 5000).unref();
 app.listen(PORT, '0.0.0.0', () => console.log(`ClassHub listening on http://0.0.0.0:${PORT}`));
